@@ -444,7 +444,7 @@ Equation: {equation_text}"""
     
     def create_formatted_pdf(self, output_path: str, title: str, 
                            sections: List[Dict[str, str]]):
-        """Create formatted PDF with proper styling - includes ALL sections"""
+        """Create formatted PDF with proper styling - includes ALL sections with proper spacing"""
         doc = SimpleDocTemplate(
             output_path,
             pagesize=letter,
@@ -457,7 +457,7 @@ Equation: {equation_text}"""
         # Define styles
         styles = getSampleStyleSheet()
         
-        # Title style - centered
+        # Title style - centered at top
         title_style = ParagraphStyle(
             'CustomTitle',
             parent=styles['Heading1'],
@@ -468,14 +468,14 @@ Equation: {equation_text}"""
             fontName='Helvetica-Bold'
         )
         
-        # Section heading style - left aligned
+        # Section heading style - left aligned with proper spacing
         heading_style = ParagraphStyle(
             'CustomHeading',
             parent=styles['Heading2'],
             fontSize=12,
             textColor=colors.black,
-            spaceAfter=12,
-            spaceBefore=12,
+            spaceAfter=12,  # One line space after heading
+            spaceBefore=18,  # Space before heading (separates from previous section)
             alignment=TA_LEFT,
             fontName='Helvetica-Bold'
         )
@@ -493,34 +493,35 @@ Equation: {equation_text}"""
         # Build document
         story = []
         
-        # Add title
+        # 1. Add title (centered at top of page)
         story.append(Paragraph(self.clean_text_for_pdf(title), title_style))
-        story.append(Spacer(1, 12))
+        story.append(Spacer(1, 24))  # Extra space after title
         
-        # Add all sections (including Abstract, Introduction, etc.)
+        # 2. Add all sections with proper formatting
         for i, section in enumerate(sections):
             heading = section.get('heading', '')
             content = section.get('content', '')
             
-            # Add heading
+            # Add section heading (e.g., ABSTRACT, INTRODUCTION, etc.)
             if heading:
-                heading_clean = self.clean_text_for_pdf(heading)
+                heading_clean = self.clean_text_for_pdf(heading.upper())  # Use uppercase for consistency
                 story.append(Paragraph(heading_clean, heading_style))
+                # One line space after heading is automatically added by heading_style.spaceAfter
             
-            # Add one line space after Abstract heading before content
-            if heading and 'abstract' in heading.lower() and i == 0:
-                story.append(Spacer(1, 12))
-            
-            # Add content
+            # Add section content
             if content:
-                # Split long content into paragraphs
+                # Split content into paragraphs
                 paragraphs = content.split('\n\n')
                 for para in paragraphs:
                     para = para.strip()
                     if para:
                         para_clean = self.clean_text_for_pdf(para)
                         story.append(Paragraph(para_clean, body_style))
-                        story.append(Spacer(1, 6))
+            
+            # Add spacing after each section (before next section heading)
+            # This creates separation between sections
+            if i < len(sections) - 1:  # Don't add after last section
+                story.append(Spacer(1, 12))
         
         # Build PDF
         doc.build(story)
