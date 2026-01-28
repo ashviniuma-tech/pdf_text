@@ -1,0 +1,4 @@
+pdfplumber==0.11.0
+pypdf==3.17.4
+reportlab==4.0.7
+anthropic==0.39.0
