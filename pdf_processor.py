@@ -92,28 +92,43 @@ class PDFProcessor:
         return text.strip()
     
     def extract_title(self, text: str) -> str:
-        """Extract title from the beginning of the paper"""
-        if self.client:
-            return self._extract_title_with_llm(text)
-        else:
-            return self._extract_title_rule_based(text)
+        """Extract title from the beginning of the paper - exact as in paper"""
+        return self._extract_title_rule_based(text)
     
     def _extract_title_rule_based(self, text: str) -> str:
-        """Rule-based title extraction"""
+        """Rule-based title extraction - takes exact title from paper"""
         lines = text.split('\n')
-        # Usually title is in first few lines and is the longest or in all caps
+        
+        # Clean and filter lines
         potential_titles = []
-        for i, line in enumerate(lines[:10]):
+        for i, line in enumerate(lines[:15]):  # Check first 15 lines
             line = line.strip()
-            if len(line) > 20 and len(line) < 200:
-                # Avoid lines with common non-title patterns
-                if not any(x in line.lower() for x in ['abstract', 'introduction', 'author', 'university', 'email', '@']):
-                    potential_titles.append(line)
+            # Skip very short lines, URLs, emails, and common header text
+            if len(line) < 10 or len(line) > 300:
+                continue
+            if any(x in line.lower() for x in ['http', 'www.', '@', 'arxiv', 'volume', 'journal', 'issn', 'doi:', 'page']):
+                continue
+            # Skip lines that look like dates or page numbers
+            if re.search(r'\d{4}|\bpage\b|\bvol\b', line.lower()):
+                continue
+            # Skip lines with common paper metadata
+            if any(x in line.lower() for x in ['abstract', 'author', 'university', 'department', 'published', 'received']):
+                continue
+            
+            potential_titles.append(line)
         
         if potential_titles:
-            # Return the first substantial line as title
+            # Return the first valid line as exact title
             return potential_titles[0]
-        return "Untitled Document"
+        
+        # Fallback: look for the longest line in first 5 lines
+        longest = ""
+        for line in lines[:5]:
+            line = line.strip()
+            if len(line) > len(longest) and len(line) > 15:
+                longest = line
+        
+        return longest if longest else "Untitled Document"
     
     def _extract_title_with_llm(self, text: str) -> str:
         """Extract title using Claude API"""
@@ -152,7 +167,7 @@ Paper excerpt:
                 abstract_start = match.start()
                 break
         
-        if abstract_start == -1: 
+        if abstract_start == -1:
             return -1, -1
         
         # Find abstract end (usually Introduction or Keywords)
@@ -200,38 +215,65 @@ Paper excerpt:
             return self._parse_sections_rule_based(text)
     
     def _parse_sections_rule_based(self, text: str) -> List[Dict[str, str]]:
-        """Rule-based section parsing"""
+        """Rule-based section parsing - captures ALL sections including abstract"""
         sections = []
         
-        # Common section headers
+        # Enhanced section patterns to catch more variations
         section_patterns = [
-            r'\n\s*(\d+\.?\s+[A-Z][^\n]{5,50})\s*\n',  # "1. Introduction"
-            r'\n\s*([A-Z][A-Z\s]{5,50})\s*\n',  # "INTRODUCTION"
-            r'\n\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*\n'  # "Introduction"
+            # Standard numbered sections: "1. Introduction", "1 Introduction", "1.1 Background"
+            r'\n\s*(\d+\.?\d*\.?\s+[A-Z][^\n]{3,60})\s*\n',
+            # All caps headers: "ABSTRACT", "INTRODUCTION"
+            r'\n\s*([A-Z][A-Z\s]{3,50})\s*\n',
+            # Title case headers: "Abstract", "Introduction", "Related Work"
+            r'\n\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,4})\s*\n',
+            # Common paper sections without numbers
+            r'\n\s*(Abstract|Introduction|Related Work|Background|Methodology|Methods|Results|Discussion|Conclusion|References|Acknowledgments)\s*\n',
         ]
         
         matches = []
         for pattern in section_patterns:
-            for match in re.finditer(pattern, text):
-                matches.append((match.start(), match.group(1).strip()))
+            for match in re.finditer(pattern, text, re.IGNORECASE):
+                header = match.group(1).strip()
+                # Skip very short matches or those with special chars
+                if len(header) < 3 or any(c in header for c in [':', '(', ')', '[', ']']):
+                    continue
+                matches.append((match.start(), header))
+        
+        # Remove duplicates (same position)
+        seen_positions = set()
+        unique_matches = []
+        for pos, header in sorted(matches, key=lambda x: x[0]):
+            if pos not in seen_positions:
+                unique_matches.append((pos, header))
+                seen_positions.add(pos)
         
         # Sort by position
-        matches.sort(key=lambda x: x[0])
+        unique_matches.sort(key=lambda x: x[0])
         
         # Extract content between headers
-        for i, (pos, header) in enumerate(matches):
+        for i, (pos, header) in enumerate(unique_matches):
             start = pos
-            end = matches[i + 1][0] if i + 1 < len(matches) else len(text)
+            end = unique_matches[i + 1][0] if i + 1 < len(unique_matches) else len(text)
             content = text[start:end]
             
-            # Remove the header from content
+            # Remove the header from content and clean
             content = content[len(header):].strip()
             
-            if content:
-                sections.append({
-                    'heading': header,
-                    'content': content
-                })
+            # Skip if content is too short (likely not a real section)
+            if len(content) < 50:
+                continue
+            
+            sections.append({
+                'heading': header,
+                'content': content
+            })
+        
+        # If no sections found, create one big section
+        if not sections:
+            sections.append({
+                'heading': 'Content',
+                'content': text
+            })
         
         return sections
     
@@ -264,10 +306,11 @@ Paper text:
             return self._parse_sections_rule_based(text)
     
     def describe_table(self, table_data: List[List]) -> str:
-        """Convert table to descriptive text"""
+        """Convert table to descriptive text - uses LLM when available"""
         if self.client:
             return self._describe_table_with_llm(table_data)
         else:
+            print("  Note: LLM not available for table description, using basic description")
             return self._describe_table_rule_based(table_data)
     
     def _describe_table_rule_based(self, table_data: List[List]) -> str:
@@ -295,33 +338,44 @@ Paper text:
         return description
     
     def _describe_table_with_llm(self, table_data: List[List]) -> str:
-        """Describe table using Claude API"""
+        """Describe table using Claude API - returns single descriptive paragraph"""
         try:
-            # Convert table to text
-            table_text = "\n".join([" | ".join([str(cell) for cell in row]) for row in table_data[:10]])
+            # Convert table to text (limit to first 20 rows for token efficiency)
+            table_rows = table_data[:20]
+            table_text = "\n".join([" | ".join([str(cell) if cell else "" for cell in row]) for row in table_rows])
             
             message = self.client.messages.create(
                 model="claude-sonnet-4-20250514",
-                max_tokens=500,
+                max_tokens=300,
                 messages=[{
                     "role": "user",
-                    "content": f"""Describe this table in one paragraph. Focus on what data it contains, key columns, and main findings.
+                    "content": f"""Describe this table in ONE comprehensive paragraph. Include:
+- What type of data the table contains
+- The main columns and what they represent
+- Key findings or patterns in the data
+- Any notable values or trends
 
-Table:
+Keep it to one flowing paragraph. Do not use bullet points or multiple paragraphs.
+
+Table data:
 {table_text}"""
                 }]
             )
             
-            return message.content[0].text.strip()
+            description = message.content[0].text.strip()
+            # Ensure it's a single paragraph by removing extra newlines
+            description = " ".join(description.split())
+            return description
         except Exception as e:
-            print(f"Error describing table with LLM: {e}")
+            print(f"  Warning: LLM table description failed ({e}), using fallback")
             return self._describe_table_rule_based(table_data)
     
     def describe_equation(self, equation_text: str) -> str:
-        """Convert equation to descriptive text"""
+        """Convert equation to descriptive text - uses LLM when available"""
         if self.client:
             return self._describe_equation_with_llm(equation_text)
         else:
+            print("  Note: LLM not available for equation description, using basic description")
             return self._describe_equation_rule_based(equation_text)
     
     def _describe_equation_rule_based(self, equation_text: str) -> str:
@@ -335,22 +389,30 @@ Table:
             return f"Formula: {equation_text}"
     
     def _describe_equation_with_llm(self, equation_text: str) -> str:
-        """Describe equation using Claude API"""
+        """Describe equation using Claude API - returns single descriptive paragraph"""
         try:
             message = self.client.messages.create(
                 model="claude-sonnet-4-20250514",
-                max_tokens=300,
+                max_tokens=200,
                 messages=[{
                     "role": "user",
-                    "content": f"""Describe this mathematical equation in plain English. Explain what it represents.
+                    "content": f"""Describe this mathematical equation/formula in ONE clear paragraph. Explain:
+- What the equation represents
+- What each variable or symbol means
+- What the equation is used for
+
+Keep it to one flowing paragraph in plain English. Do not use mathematical notation in your description.
 
 Equation: {equation_text}"""
                 }]
             )
             
-            return message.content[0].text.strip()
+            description = message.content[0].text.strip()
+            # Ensure it's a single paragraph
+            description = " ".join(description.split())
+            return description
         except Exception as e:
-            print(f"Error describing equation with LLM: {e}")
+            print(f"  Warning: LLM equation description failed ({e}), using fallback")
             return self._describe_equation_rule_based(equation_text)
     
     def process_content(self, text: str, tables: List[Dict]) -> str:
@@ -380,9 +442,9 @@ Equation: {equation_text}"""
         
         return text
     
-    def create_formatted_pdf(self, output_path: str, title: str, abstract: str, 
+    def create_formatted_pdf(self, output_path: str, title: str, 
                            sections: List[Dict[str, str]]):
-        """Create formatted PDF with proper styling"""
+        """Create formatted PDF with proper styling - includes ALL sections"""
         doc = SimpleDocTemplate(
             output_path,
             pagesize=letter,
@@ -418,16 +480,6 @@ Equation: {equation_text}"""
             fontName='Helvetica-Bold'
         )
         
-        # Abstract style - justified
-        abstract_style = ParagraphStyle(
-            'AbstractStyle',
-            parent=styles['Normal'],
-            fontSize=10,
-            alignment=TA_JUSTIFY,
-            spaceAfter=20,
-            fontName='Helvetica'
-        )
-        
         # Body text style - justified
         body_style = ParagraphStyle(
             'BodyStyle',
@@ -442,30 +494,24 @@ Equation: {equation_text}"""
         story = []
         
         # Add title
-        story.append(Paragraph(title, title_style))
+        story.append(Paragraph(self.clean_text_for_pdf(title), title_style))
         story.append(Spacer(1, 12))
         
-        # Add abstract heading
-        story.append(Paragraph("<b>Abstract</b>", heading_style))
-        
-        # Add abstract content
-        if abstract:
-            # Clean abstract text
-            abstract_clean = self.clean_text_for_pdf(abstract)
-            story.append(Paragraph(abstract_clean, abstract_style))
-        
-        # One line space before content
-        story.append(Spacer(1, 12))
-        
-        # Add sections
-        for section in sections:
+        # Add all sections (including Abstract, Introduction, etc.)
+        for i, section in enumerate(sections):
             heading = section.get('heading', '')
             content = section.get('content', '')
             
+            # Add heading
             if heading:
                 heading_clean = self.clean_text_for_pdf(heading)
                 story.append(Paragraph(heading_clean, heading_style))
             
+            # Add one line space after Abstract heading before content
+            if heading and 'abstract' in heading.lower() and i == 0:
+                story.append(Spacer(1, 12))
+            
+            # Add content
             if content:
                 # Split long content into paragraphs
                 paragraphs = content.split('\n\n')
@@ -478,6 +524,7 @@ Equation: {equation_text}"""
         
         # Build PDF
         doc.build(story)
+        print(f"  ✓ PDF created with {len(sections)} sections")
     
     def clean_text_for_pdf(self, text: str) -> str:
         """Clean text for PDF rendering - escape special characters"""
@@ -492,38 +539,53 @@ Equation: {equation_text}"""
         return text.strip()
     
     def process_pdf(self, input_path: str, output_path: str):
-        """Main processing pipeline"""
+        """Main processing pipeline - extracts ALL sections"""
         print("Step 1: Extracting text from PDF...")
         full_text = self.extract_text_from_pdf(input_path)
         
-        print("Step 2: Extracting title...")
+        print("Step 2: Extracting title (exact from paper)...")
         title = self.extract_title(full_text)
         print(f"  Title: {title}")
         
-        print("Step 3: Extracting abstract...")
-        abstract = self.extract_abstract(full_text)
-        
-        print("Step 4: Removing content between title and abstract...")
-        # Get text starting from abstract
-        _, abstract_end = self.find_abstract_section(full_text)
-        if abstract_end > 0:
-            content_text = full_text[abstract_end:]
-        else:
-            content_text = full_text
-        
-        print("Step 5: Extracting tables...")
+        print("Step 3: Extracting tables...")
         tables = self.extract_tables_from_pdf(input_path)
         print(f"  Found {len(tables)} tables")
         
-        print("Step 6: Processing content (removing URLs, converting tables/equations)...")
-        processed_content = self.process_content(content_text, tables)
+        print("Step 4: Removing content before abstract (authors, affiliations)...")
+        # Find where abstract starts
+        abstract_start, abstract_end = self.find_abstract_section(full_text)
         
-        print("Step 7: Parsing sections...")
+        if abstract_start > 0:
+            # Get everything from abstract onwards (includes abstract, intro, all sections)
+            content_from_abstract = full_text[abstract_start:]
+        else:
+            # If no abstract found, try to skip initial metadata
+            # Look for Introduction or numbered section
+            intro_match = re.search(r'\b(introduction|1\s*\.?\s*introduction)\b', full_text, re.IGNORECASE)
+            if intro_match:
+                content_from_abstract = full_text[intro_match.start():]
+            else:
+                # Take everything after first 500 chars to skip header
+                content_from_abstract = full_text[500:] if len(full_text) > 500 else full_text
+        
+        print("Step 5: Processing content (removing URLs, converting tables/equations)...")
+        processed_content = self.process_content(content_from_abstract, tables)
+        
+        print("Step 6: Parsing ALL sections (abstract, introduction, methods, etc.)...")
         sections = self.parse_sections(processed_content)
         print(f"  Found {len(sections)} sections")
         
-        print("Step 8: Creating formatted PDF...")
-        self.create_formatted_pdf(output_path, title, abstract, sections)
+        # Print section names for verification
+        if sections:
+            print("  Sections detected:")
+            for i, section in enumerate(sections[:10], 1):  # Show first 10
+                heading = section.get('heading', 'Unknown')
+                print(f"    {i}. {heading}")
+            if len(sections) > 10:
+                print(f"    ... and {len(sections) - 10} more")
+        
+        print("Step 7: Creating formatted PDF...")
+        self.create_formatted_pdf(output_path, title, sections)
         
         print(f"\n✓ Processing complete! Output saved to: {output_path}")
 
